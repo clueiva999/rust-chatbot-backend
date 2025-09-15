@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant Chatbot</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 20px;
+            width: 100%;
+            max-width: 1200px;
+            height: 80vh;
+        }
+
+        .context-panel {
+            width: 300px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .context-header {
+            background: linear-gradient(90deg, #ff9a9e 0%, #fecfef 100%);
+            color: #2d3748;
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+
+        .context-form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-label {
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #374151;
+        }
+
+        .form-input, .form-textarea {
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .form-input:focus, .form-textarea:focus {
+            border-color: #ff9a9e;
+        }
+
+        .form-textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .context-button {
+            padding: 10px 16px;
+            background: linear-gradient(90deg, #ff9a9e 0%, #fecfef 100%);
+            color: #2d3748;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .context-button:hover {
+            transform: translateY(-2px);
+        }
+
+        .presets {
+            margin-top: 20px;
+        }
+
+        .presets-title {
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #374151;
+        }
+
+        .preset-item {
+            padding: 8px 12px;
+            background: #f3f4f6;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background-color 0.2s;
+        }
+
+        .preset-item:hover {
+            background: #e5e7eb;
+        }
+
+        .chat-container {
+            flex: 1;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: 600;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8fafc;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 15px;
+            border-radius: 12px;
+            max-width: 85%;
+            word-wrap: break-word;
+        }
+
+        .user-message {
+            background: #e3f2fd;
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .ai-message {
+            background: white;
+            border: 1px solid #e0e7ff;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        .ai-message h1, .ai-message h2, .ai-message h3 {
+            color: #1e40af;
+            margin: 10px 0;
+        }
+
+        .ai-message ul, .ai-message ol {
+            margin: 10px 0 10px 20px;
+        }
+
+        .ai-message code {
+            background: #f1f5f9;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .ai-message pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .chat-input-container {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e5e7eb;
+        }
+
+        .chat-input-wrapper {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 25px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .chat-input:focus {
+            border-color: #4facfe;
+        }
+
+        .send-button {
+            padding: 12px 24px;
+            background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .send-button:hover {
+            transform: translateY(-2px);
+        }
+
+        .send-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            font-size: 14px;
+            color: #6b7280;
+        }
+
+        .status.connected {
+            color: #10b981;
+        }
+
+        .status.disconnected {
+            color: #ef4444;
+        }
+
+        @media (max-width: 768px) {
+            .main-container {
+                flex-direction: column;
+                height: 90vh;
+            }
+            
+            .context-panel {
+                width: 100%;
+                height: 250px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="context-panel">
+            <div class="context-header">
+                🎯 Role Context
+            </div>
+            
+            <div class="context-form">
+                <div class="form-group">
+                    <label class="form-label">Role</label>
+                    <input type="text" id="roleInput" class="form-input" placeholder="e.g., Software Engineer">
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">Description</label>
+                    <textarea id="descriptionInput" class="form-textarea" placeholder="Describe the role, responsibilities, skills, etc."></textarea>
+                </div>
+                
+                <button id="updateContextBtn" class="context-button">Update Context</button>
+            </div>
+            
+            <div class="presets">
+                <div class="presets-title">📋 Quick Presets</div>
+                <div class="preset-item" data-role="Software Engineer" data-desc="Experienced Software Engineer proficient in Rust and cloud computing (AWS, Azure). Responsibilities include designing scalable systems, writing high-quality code, and collaborating with cross-functional teams. Familiar with microservices and containerization.">
+                    💻 Software Engineer
+                </div>
+                <div class="preset-item" data-role="Data Scientist" data-desc="Data Scientist expert in machine learning, statistical analysis, and data visualization. Proficient in Python, R, SQL, and ML frameworks. Responsibilities include building predictive models, analyzing complex datasets, and deriving actionable insights.">
+                    📊 Data Scientist
+                </div>
+                <div class="preset-item" data-role="Product Manager" data-desc="Product Manager responsible for product strategy, roadmap planning, and cross-functional coordination. Experienced in user research, market analysis, and agile methodologies. Focuses on delivering user-centric solutions and driving business growth.">
+                    🚀 Product Manager
+                </div>
+                <div class="preset-item" data-role="DevOps Engineer" data-desc="DevOps Engineer specializing in CI/CD pipelines, infrastructure automation, and cloud platforms. Expert in containerization, monitoring, and security practices. Ensures reliable and scalable system deployments.">
+                    ⚙️ DevOps Engineer
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-container">
+            <div class="chat-header">
+                🤖 AI Assistant Chatbot
+            </div>
+            
+            <div class="chat-messages" id="messages">
+                <!-- Messages will appear here -->
+            </div>
+            
+            <div class="status" id="status">Connecting...</div>
+            
+            <div class="chat-input-container">
+                <div class="chat-input-wrapper">
+                    <input 
+                        type="text" 
+                        id="messageInput" 
+                        class="chat-input" 
+                        placeholder="Ask me anything..." 
+                        disabled
+                    >
+                    <button id="sendButton" class="send-button" disabled>Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class ChatBot {
+            constructor() {
+                this.ws = null;
+                this.messagesContainer = document.getElementById('messages');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.status = document.getElementById('status');
+                
+                // Context management elements
+                this.roleInput = document.getElementById('roleInput');
+                this.descriptionInput = document.getElementById('descriptionInput');
+                this.updateContextBtn = document.getElementById('updateContextBtn');
+                
+                this.connect();
+                this.setupEventListeners();
+            }
+
+            connect() {
+                const wsUrl = `ws://${window.location.host}/ws`;
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    this.updateStatus('Connected', 'connected');
+                    this.messageInput.disabled = false;
+                    this.sendButton.disabled = false;
+                };
+
+                this.ws.onmessage = (event) => {
+                    this.addMessage(event.data, 'ai');
+                };
+
+                this.ws.onclose = () => {
+                    this.updateStatus('Disconnected - Reconnecting...', 'disconnected');
+                    this.messageInput.disabled = true;
+                    this.sendButton.disabled = true;
+                    // Attempt to reconnect after 3 seconds
+                    setTimeout(() => this.connect(), 3000);
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateStatus('Connection Error', 'disconnected');
+                };
+            }
+
+            setupEventListeners() {
+                // Chat functionality
+                this.sendButton.addEventListener('click', () => this.sendMessage());
+                
+                this.messageInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                // Context management
+                this.updateContextBtn.addEventListener('click', () => this.updateContext());
+                
+                // Preset buttons
+                document.querySelectorAll('.preset-item').forEach(preset => {
+                    preset.addEventListener('click', () => {
+                        const role = preset.getAttribute('data-role');
+                        const desc = preset.getAttribute('data-desc');
+                        this.loadPreset(role, desc);
+                    });
+                });
+
+                // Enter key in context form
+                this.roleInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        this.updateContext();
+                    }
+                });
+
+                this.descriptionInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter' && e.ctrlKey) {
+                        e.preventDefault();
+                        this.updateContext();
+                    }
+                });
+            }
+
+            loadPreset(role, description) {
+                this.roleInput.value = role;
+                this.descriptionInput.value = description;
+                this.updateContext();
+            }
+
+            updateContext() {
+                const role = this.roleInput.value.trim();
+                const description = this.descriptionInput.value.trim();
+                
+                if (!role || !description) {
+                    alert('Please fill in both role and description fields.');
+                    return;
+                }
+
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    alert('Not connected to server. Please wait for connection.');
+                    return;
+                }
+
+                const contextCommand = `!context ${role} | ${description}`;
+                this.ws.send(contextCommand);
+            }
+
+            sendMessage() {
+                const message = this.messageInput.value.trim();
+                if (!message || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+
+                this.addMessage(message, 'user');
+                this.ws.send(message);
+                this.messageInput.value = '';
+            }
+
+            addMessage(content, type) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${type}-message`;
+                
+                if (type === 'ai') {
+                    // Parse markdown for AI messages
+                    messageDiv.innerHTML = marked.parse(content);
+                } else {
+                    // Plain text for user messages
+                    messageDiv.textContent = content;
+                }
+
+                this.messagesContainer.appendChild(messageDiv);
+                this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+            }
+
+            updateStatus(message, className) {
+                this.status.textContent = message;
+                this.status.className = `status ${className}`;
+            }
+        }
+
+        // Initialize the chatbot when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new ChatBot();
+        });
+    </script>
+</body>
+</html> 

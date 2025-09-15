@@ -1,0 +1,48 @@
+# fly.toml — production configuration for little-fog-4556
+
+app = "clueiva-chatbot"
+primary_region = "bom"
+
+
+[env]
+  PORT     = "8080"
+
+# ====== Services ======
+[[services]]
+  internal_port = 8080
+  protocol      = "tcp"
+
+  # Treat each open WebSocket or HTTP connection as one “request”
+  [services.concurrency]
+    type       = "connections"
+    soft_limit = 500
+    hard_limit = 1000
+
+  # HTTP on port 80 (upgrades to ws://)
+  [[services.ports]]
+    port     = 80
+    handlers = ["http"]
+
+  # HTTPS on port 443 (upgrades to wss://)
+  [[services.ports]]
+    port     = 443
+    handlers = ["tls", "http"]
+
+  # HTTP health check (optional endpoint in your app)
+  [[services.http_checks]]
+    interval        = "10s"
+    timeout         = "2s"
+    method          = "get"
+    path            = "/"
+    expected_status = 200
+
+  # TCP health check to catch dead sockets
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout  = "2s"
+
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
