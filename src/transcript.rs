@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+/// JWT authentication result for transcript sessions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthenticatedUser {
+    pub user_id: String,
+    pub email: Option<String>,
+    pub is_pro: bool,
+}
+
 /// A single transcript item representing spoken text from a speaker
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TranscriptItem {
@@ -187,18 +195,30 @@ impl ChunkMetadata {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum TranscriptWsMessage {
+    /// Client sends authentication token
+    #[serde(rename = "authenticate")]
+    Authenticate { token: String },
+
     /// Client sends transcript item
     #[serde(rename = "transcript_item")]
     TranscriptItem(TranscriptItem),
-    
+
+    /// Server sends authentication response
+    #[serde(rename = "auth_response")]
+    AuthResponse {
+        success: bool,
+        error: Option<String>,
+        user: Option<AuthenticatedUser>
+    },
+
     /// Server sends transcript item to subscribers
     #[serde(rename = "live_transcript")]
     LiveTranscript(TranscriptItem),
-    
+
     /// Server sends error message
     #[serde(rename = "error")]
     Error { message: String },
-    
+
     /// Server sends success confirmation
     #[serde(rename = "success")]
     Success { message: String },

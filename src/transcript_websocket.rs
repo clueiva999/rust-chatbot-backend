@@ -3,14 +3,14 @@
 //! This module implements the WebSocket endpoint for receiving transcript items
 //! from Electron apps and broadcasting them to connected Next.js clients.
 
-use crate::transcript::{TranscriptWsMessage, TranscriptError};
+use crate::transcript::{TranscriptWsMessage, TranscriptError, AuthenticatedUser};
 use crate::transcript_service::TranscriptService;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -19,14 +19,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use tracing::{debug, error, info, warn};
-
-/// JWT authentication result
-#[derive(Debug, Clone)]
-pub struct AuthenticatedUser {
-    pub user_id: String,
-    pub email: Option<String>,
-    pub is_pro: bool,
-}
 
 /// WebSocket connection state
 #[derive(Debug)]
@@ -40,19 +32,12 @@ struct ConnectionState {
 pub async fn transcript_websocket_handler(
     ws: WebSocketUpgrade,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
     State(app_state): State<Arc<crate::AppState>>,
 ) -> impl IntoResponse {
-    // Extract JWT token from Sec-WebSocket-Protocol header
-    let auth_token = headers
-        .get("sec-websocket-protocol")
-        .and_then(|value| value.to_str().ok())
-        .map(|s| s.to_string());
-
     info!("WebSocket upgrade request for session: {}", session_id);
 
     ws.on_upgrade(move |socket| {
-        handle_transcript_websocket(socket, session_id, auth_token, app_state)
+        handle_transcript_websocket(socket, session_id, app_state)
     })
 }
 
@@ -60,82 +45,31 @@ pub async fn transcript_websocket_handler(
 async fn handle_transcript_websocket(
     socket: WebSocket,
     session_id: String,
-    auth_token: Option<String>,
     app_state: Arc<crate::AppState>,
 ) {
     let connection_id = Uuid::new_v4().to_string();
-    info!("New transcript WebSocket connection: {} for session: {}", connection_id, session_id);
+    info!("New transcript WebSocket connection: {} for session: {} (authentication required)", connection_id, session_id);
 
-    let mut state = ConnectionState {
+    let state = Arc::new(tokio::sync::RwLock::new(ConnectionState {
         session_id: session_id.clone(),
         user: None,
         is_authenticated: false,
-    };
-
-    // Authenticate the connection
-    if let Some(token) = auth_token {
-        match authenticate_jwt_token(&token).await {
-            Ok(user) => {
-                state.user = Some(user.clone());
-                state.is_authenticated = true;
-                info!("Authenticated user {} for session {}", user.user_id, session_id);
-
-                // Create session in both memory and database
-                if let Err(e) = app_state.transcript_service.create_session(session_id.clone(), user.user_id.clone()) {
-                    error!("Failed to create session in memory {}: {}", session_id, e);
-                    return;
-                }
-
-                // Create session record in database (async, but don't block WebSocket)
-                let integrated_service = Arc::clone(&app_state.integrated_service);
-                let session_id_clone = session_id.clone();
-                let user_id_clone = user.user_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = integrated_service.create_session_with_db(
-                        session_id_clone.clone(),
-                        user_id_clone,
-                        None
-                    ).await {
-                        error!("Failed to create session in database {}: {}", session_id_clone, e);
-                        // Continue anyway - session exists in memory for real-time streaming
-                    }
-                });
-            }
-            Err(e) => {
-                error!("Authentication failed for session {}: {}", session_id, e);
-                return;
-            }
-        }
-    } else {
-        error!("No authentication token provided for session {}", session_id);
-        return;
-    }
+    }));
 
     // Split the WebSocket into sender and receiver
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (ws_sender, mut ws_receiver) = socket.split();
+    let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
-    // Subscribe to live transcript updates for this session with retry
-    let mut live_receiver = {
-        let mut attempts = 0;
-        loop {
-            match app_state.transcript_service.subscribe_to_session(&session_id) {
-                Ok(receiver) => break receiver,
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= 3 {
-                        error!("Failed to subscribe to session {} after {} attempts: {}", session_id, attempts, e);
-                        return;
-                    }
-                    warn!("Failed to subscribe to session {} (attempt {}): {}, retrying...", session_id, attempts, e);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-            }
-        }
-    };
+    // We'll create the live receiver only after authentication
+    let live_receiver: Arc<tokio::sync::Mutex<Option<tokio::sync::broadcast::Receiver<crate::transcript::TranscriptItem>>>> = Arc::new(tokio::sync::Mutex::new(None));
 
     // Spawn task to handle incoming messages from client
     let transcript_service_clone = Arc::clone(&app_state.transcript_service);
+    let integrated_service_clone = Arc::clone(&app_state.integrated_service);
     let session_id_clone = session_id.clone();
+    let state_clone = Arc::clone(&state);
+    let ws_sender_clone = Arc::clone(&ws_sender);
+    let live_receiver_clone = Arc::clone(&live_receiver);
     let incoming_task = tokio::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
@@ -144,6 +78,10 @@ async fn handle_transcript_websocket(
                         &text,
                         &session_id_clone,
                         &transcript_service_clone,
+                        Arc::clone(&integrated_service_clone),
+                        Arc::clone(&state_clone),
+                        Arc::clone(&ws_sender_clone),
+                        Arc::clone(&live_receiver_clone),
                     ).await {
                         error!("Error handling incoming message for session {}: {}", session_id_clone, e);
                     }
@@ -165,20 +103,46 @@ async fn handle_transcript_websocket(
 
     // Handle outgoing messages (live transcript broadcasts)
     let session_id_clone = session_id.clone();
+    let ws_sender_clone = Arc::clone(&ws_sender);
+    let live_receiver_clone = Arc::clone(&live_receiver);
     let outgoing_task = tokio::spawn(async move {
-        while let Ok(transcript_item) = live_receiver.recv().await {
-            let message = TranscriptWsMessage::LiveTranscript(transcript_item);
-            
-            match serde_json::to_string(&message) {
-                Ok(json) => {
-                    if let Err(e) = ws_sender.send(Message::Text(json)).await {
-                        error!("Failed to send live transcript for session {}: {}", session_id_clone, e);
+        loop {
+            // Check if we have a live receiver (only after authentication)
+            let receiver_opt = {
+                let mut receiver_guard = live_receiver_clone.lock().await;
+                receiver_guard.take()
+            };
+
+            if let Some(mut receiver) = receiver_opt {
+                // We have a receiver, listen for transcript items
+                match receiver.recv().await {
+                    Ok(transcript_item) => {
+                        let message = TranscriptWsMessage::LiveTranscript(transcript_item);
+
+                        match serde_json::to_string(&message) {
+                            Ok(json) => {
+                                let mut sender = ws_sender_clone.lock().await;
+                                if let Err(e) = sender.send(Message::Text(json)).await {
+                                    error!("Failed to send live transcript for session {}: {}", session_id_clone, e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to serialize live transcript for session {}: {}", session_id_clone, e);
+                            }
+                        }
+
+                        // Put the receiver back
+                        *live_receiver_clone.lock().await = Some(receiver);
+                    }
+                    Err(_) => {
+                        // Channel closed, break the loop
                         break;
                     }
                 }
-                Err(e) => {
-                    error!("Failed to serialize live transcript for session {}: {}", session_id_clone, e);
-                }
+            } else {
+                // No receiver yet, wait a bit and check again
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         }
     });
@@ -201,12 +165,104 @@ async fn handle_incoming_message(
     text: &str,
     session_id: &str,
     transcript_service: &TranscriptService,
+    integrated_service: Arc<crate::transcript_integration::IntegratedTranscriptService>,
+    state: Arc<tokio::sync::RwLock<ConnectionState>>,
+    ws_sender: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
+    live_receiver: Arc<tokio::sync::Mutex<Option<tokio::sync::broadcast::Receiver<crate::transcript::TranscriptItem>>>>,
 ) -> Result<(), TranscriptError> {
     let message: TranscriptWsMessage = serde_json::from_str(text)
         .map_err(|e| TranscriptError::SerializationError(format!("Invalid message format: {}", e)))?;
 
     match message {
+        TranscriptWsMessage::Authenticate { token } => {
+            debug!("Received authentication request for session: {}", session_id);
+
+            match authenticate_user(&token).await {
+                Ok(user) => {
+                    // Update connection state
+                    {
+                        let mut state_guard = state.write().await;
+                        state_guard.user = Some(user.clone());
+                        state_guard.is_authenticated = true;
+                    }
+
+                    info!("Authenticated user {} for session {}", user.user_id, session_id);
+
+                    // Create session in memory and database
+                    if let Err(e) = transcript_service.create_session(session_id.to_string(), user.user_id.clone()) {
+                        error!("Failed to create session in memory {}: {}", session_id, e);
+
+                        // Send error response
+                        let error_response = TranscriptWsMessage::AuthResponse {
+                            success: false,
+                            error: Some(format!("Failed to create session: {}", e)),
+                            user: None,
+                        };
+                        send_message(ws_sender.clone(), &error_response).await?;
+                        return Ok(());
+                    }
+
+                    // Create session record in database (async, but don't block WebSocket)
+                    let integrated_service_clone = integrated_service.clone();
+                    let session_id_clone = session_id.to_string();
+                    let user_id_clone = user.user_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = integrated_service_clone.create_session_with_db(
+                            session_id_clone.clone(),
+                            user_id_clone,
+                            None
+                        ).await {
+                            error!("Failed to create session in database {}: {}", session_id_clone, e);
+                        }
+                    });
+
+                    // Subscribe to live transcript updates
+                    match transcript_service.subscribe_to_session(session_id) {
+                        Ok(receiver) => {
+                            *live_receiver.lock().await = Some(receiver);
+                        }
+                        Err(e) => {
+                            warn!("Failed to subscribe to session {}: {}", session_id, e);
+                        }
+                    }
+
+                    // Send success response
+                    let auth_response = TranscriptWsMessage::AuthResponse {
+                        success: true,
+                        error: None,
+                        user: Some(user),
+                    };
+                    send_message(ws_sender.clone(), &auth_response).await?;
+                }
+                Err(e) => {
+                    error!("Authentication failed for session {}: {}", session_id, e);
+
+                    // Send error response
+                    let error_response = TranscriptWsMessage::AuthResponse {
+                        success: false,
+                        error: Some(e),
+                        user: None,
+                    };
+                    send_message(ws_sender.clone(), &error_response).await?;
+                }
+            }
+        }
         TranscriptWsMessage::TranscriptItem(item) => {
+            // Check if authenticated
+            let is_authenticated = {
+                let state_guard = state.read().await;
+                state_guard.is_authenticated
+            };
+
+            if !is_authenticated {
+                warn!("Received transcript item from unauthenticated connection for session: {}", session_id);
+                let error_response = TranscriptWsMessage::Error {
+                    message: "Authentication required before sending transcript items".to_string(),
+                };
+                send_message(ws_sender.clone(), &error_response).await?;
+                return Ok(());
+            }
+
             debug!("Received transcript item for session {}: {} chars", session_id, item.text.len());
             transcript_service.add_transcript_item(session_id, item)?;
         }
@@ -218,39 +274,129 @@ async fn handle_incoming_message(
     Ok(())
 }
 
-/// Authenticate JWT token (placeholder implementation)
-/// In a real implementation, this would validate the JWT against your auth service
-async fn authenticate_jwt_token(token: &str) -> Result<AuthenticatedUser, TranscriptError> {
-    // TODO: Implement actual JWT validation
-    // This is a placeholder that should be replaced with real JWT validation
-    // against your Next.js auth service
-    
-    if token.is_empty() {
-        return Err(TranscriptError::AuthenticationError("Empty token".to_string()));
+/// Helper function to send a message over WebSocket
+async fn send_message(
+    ws_sender: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
+    message: &TranscriptWsMessage,
+) -> Result<(), TranscriptError> {
+    match serde_json::to_string(message) {
+        Ok(json) => {
+            let mut sender = ws_sender.lock().await;
+            sender.send(Message::Text(json)).await
+                .map_err(|e| TranscriptError::WebSocketError(format!("Failed to send message: {}", e)))?;
+            Ok(())
+        }
+        Err(e) => {
+            Err(TranscriptError::SerializationError(format!("Failed to serialize message: {}", e)))
+        }
     }
+}
 
-    // For now, we'll do a simple validation
-    // In production, you would:
-    // 1. Decode and verify the JWT signature
-    // 2. Check expiration
-    // 3. Validate against your user database
-    // 4. Check if user has pro access for transcript features
-    
-    if token.starts_with("valid_") {
-        // Extract user_id from token (this is just for demo)
-        let user_id = token.strip_prefix("valid_").unwrap_or("unknown").to_string();
-        
-        Ok(AuthenticatedUser {
-            user_id,
-            email: None,
-            is_pro: true, // For demo purposes
-        })
-    } else {
-        Err(TranscriptError::AuthenticationError("Invalid token".to_string()))
+/// Authenticate JWT token using the same logic as the main /ws endpoint
+async fn authenticate_user(token: &str) -> Result<crate::transcript::AuthenticatedUser, String> {
+    let info = fetch_user_context(token).await.map_err(|e| e.to_string())?;
+
+    let u = info.get("user").ok_or("bad user")?;
+    let user = crate::transcript::AuthenticatedUser {
+        user_id: u.get("id").and_then(|v| v.as_str()).unwrap_or_default().into(),
+        email: u.get("email").and_then(|v| v.as_str()).map(|s| s.into()),
+        is_pro: u.get("isPro").and_then(|v| v.as_bool()).unwrap_or(false),
+    };
+
+    Ok(user)
+}
+
+/// Fetch user context from Next.js API (same as main.rs)
+async fn fetch_user_context(tok: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let cli = reqwest::Client::builder().user_agent("hiremage/1.0").build()?;
+    let url = std::env::var("NEXTJS_URL").unwrap_or_else(|_| "https://clueiva.com".into());
+    let r = cli.get(format!("{url}/api/user/context")).bearer_auth(tok).send().await?;
+    if !r.status().is_success() {
+        return Err(format!("ctx http {}", r.status()).into())
     }
+    Ok(r.json().await?)
 }
 
 /// Health check endpoint for transcript WebSocket service
 pub async fn transcript_health_check() -> impl IntoResponse {
     (StatusCode::OK, "Transcript WebSocket service is healthy")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_authenticate_message_parsing() {
+        let auth_message = json!({
+            "type": "authenticate",
+            "token": "test_jwt_token_here"
+        });
+
+        let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(auth_message);
+        assert!(parsed.is_ok());
+
+        let message = parsed.unwrap();
+        match message {
+            TranscriptWsMessage::Authenticate { token } => {
+                assert_eq!(token, "test_jwt_token_here");
+            }
+            _ => panic!("Expected Authenticate message"),
+        }
+    }
+
+    #[test]
+    fn test_auth_response_message_parsing() {
+        let auth_response = json!({
+            "type": "auth_response",
+            "success": true,
+            "error": null,
+            "user": {
+                "user_id": "test_user_123",
+                "email": "test@example.com",
+                "is_pro": true
+            }
+        });
+
+        let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(auth_response);
+        assert!(parsed.is_ok());
+
+        let message = parsed.unwrap();
+        match message {
+            TranscriptWsMessage::AuthResponse { success, error, user } => {
+                assert!(success);
+                assert!(error.is_none());
+                assert!(user.is_some());
+                let user = user.unwrap();
+                assert_eq!(user.user_id, "test_user_123");
+                assert_eq!(user.email, Some("test@example.com".to_string()));
+                assert!(user.is_pro);
+            }
+            _ => panic!("Expected AuthResponse message"),
+        }
+    }
+
+    #[test]
+    fn test_error_auth_response_parsing() {
+        let error_response = json!({
+            "type": "auth_response",
+            "success": false,
+            "error": "Invalid token",
+            "user": null
+        });
+
+        let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(error_response);
+        assert!(parsed.is_ok());
+
+        let message = parsed.unwrap();
+        match message {
+            TranscriptWsMessage::AuthResponse { success, error, user } => {
+                assert!(!success);
+                assert_eq!(error, Some("Invalid token".to_string()));
+                assert!(user.is_none());
+            }
+            _ => panic!("Expected AuthResponse message"),
+        }
+    }
 }

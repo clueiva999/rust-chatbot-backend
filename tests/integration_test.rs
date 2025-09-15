@@ -10,11 +10,9 @@ use tokio::time::sleep;
 use serde_json::json;
 use uuid::Uuid;
 
-// Import our modules
+// Import our modules - using the binary crate name
 use rust_chatbot_groq::transcript::*;
 use rust_chatbot_groq::transcript_service::TranscriptService;
-use rust_chatbot_groq::s3_service::S3Service;
-use rust_chatbot_groq::db_service::DatabaseService;
 
 #[tokio::test]
 async fn test_transcript_buffer_functionality() {
@@ -329,4 +327,78 @@ pub async fn run_integration_tests() {
     test_error_handling_scenarios().await;
     
     println!("\n🎉 All integration tests completed!");
+}
+
+#[tokio::test]
+async fn test_transcript_websocket_authentication_messages() {
+    println!("Testing transcript WebSocket authentication message parsing...");
+
+    // Test authenticate message
+    let auth_message = json!({
+        "type": "authenticate",
+        "token": "test_jwt_token_here"
+    });
+
+    let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(auth_message);
+    assert!(parsed.is_ok());
+
+    let message = parsed.unwrap();
+    match message {
+        TranscriptWsMessage::Authenticate { token } => {
+            assert_eq!(token, "test_jwt_token_here");
+        }
+        _ => panic!("Expected Authenticate message"),
+    }
+
+    // Test auth response message
+    let auth_response = json!({
+        "type": "auth_response",
+        "success": true,
+        "error": null,
+        "user": {
+            "user_id": "test_user_123",
+            "email": "test@example.com",
+            "is_pro": true
+        }
+    });
+
+    let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(auth_response);
+    assert!(parsed.is_ok());
+
+    let message = parsed.unwrap();
+    match message {
+        TranscriptWsMessage::AuthResponse { success, error, user } => {
+            assert!(success);
+            assert!(error.is_none());
+            assert!(user.is_some());
+            let user = user.unwrap();
+            assert_eq!(user.user_id, "test_user_123");
+            assert_eq!(user.email, Some("test@example.com".to_string()));
+            assert!(user.is_pro);
+        }
+        _ => panic!("Expected AuthResponse message"),
+    }
+
+    // Test error auth response
+    let error_response = json!({
+        "type": "auth_response",
+        "success": false,
+        "error": "Invalid token",
+        "user": null
+    });
+
+    let parsed: Result<TranscriptWsMessage, _> = serde_json::from_value(error_response);
+    assert!(parsed.is_ok());
+
+    let message = parsed.unwrap();
+    match message {
+        TranscriptWsMessage::AuthResponse { success, error, user } => {
+            assert!(!success);
+            assert_eq!(error, Some("Invalid token".to_string()));
+            assert!(user.is_none());
+        }
+        _ => panic!("Expected AuthResponse message"),
+    }
+
+    println!("✅ Transcript WebSocket authentication message parsing test passed");
 }
